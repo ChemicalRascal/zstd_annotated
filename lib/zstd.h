@@ -356,6 +356,7 @@ typedef enum { ZSTD_fast, ZSTD_dfast, ZSTD_greedy, ZSTD_lazy, ZSTD_lazy2, ZSTD_b
 typedef struct {
     unsigned windowLog;      /**< largest match distance : larger == more compression, more memory needed during decompression */
     unsigned chainLog;       /**< fully searched segment : larger == more compression, slower, more memory (useless for fast) */
+    /** JD: Not sure how this is a dispatch table, it's an integer. **/
     unsigned hashLog;        /**< dispatch table : larger == faster, more memory */
     unsigned searchLog;      /**< nb of searches : larger == more compression, slower */
     unsigned searchLength;   /**< match length searched : larger == faster decompression, sometimes less compression */

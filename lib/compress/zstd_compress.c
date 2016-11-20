@@ -65,15 +65,35 @@ struct ZSTD_CCtx_s
     U32   rep[ZSTD_REP_NUM];
     U32   savedRep[ZSTD_REP_NUM];
     U32   dictID;
+    /** JD: ZSTD_continueCCtx : function arg (trace back to L2712) **/
     ZSTD_parameters params;
+    /** JD: Allocated at in ZSTD_resetCCtx_advanced.
+     ** (If ZSTDcrp_noMemset, gets set to the size of tableSpace)
+     ** hashTable  = (U32*)workSpace
+     ** chainTable = hashTable  + hSize
+     ** hashTable3 = chainTable + chainSize
+     ** ptr        = hashTable3 + h3Size
+     ** hufTable   = (HUF_CElt*)ptr
+     ** THEN: ptr  = ((U32*)ptr) + 256 <- Comment describes HUF_CElt* as being an
+     **                                   "incomplete type", simulates size with U32...?
+     **
+     ** But all of this happens without a malloc, beyond anything to workSpace.
+     ** So, workSpace holds all of them? Maybe just easier to keep track of the space,
+     ** thus only have to perform one free() at the end. Also simplifies copying.
+     ** ZSTD_coppyCCtx describes these as "dictionary offsets".
+     **/
     void* workSpace;
     size_t workSpaceSize;
+    /** **/
     size_t blockSize;
     U64 frameContentSize;
     XXH64_state_t xxhState;
     ZSTD_customMem customMem;
 
-    seqStore_t seqStore;    /* sequences storage ptrs */
+    /** JD: large swathes of this is (only?) set when btopt{,2} is the cParams strategy.
+     ** Sequences of matches?
+     **/
+    seqStore_t seqStore;    /* sequences storage ptrs */ 
     U32* hashTable;
     U32* hashTable3;
     U32* chainTable;
@@ -174,7 +194,10 @@ ZSTD_compressionParameters ZSTD_adjustCParams(ZSTD_compressionParameters cPar, u
     return cPar;
 }
 
-
+/** JD: This seems to estimate based on params, a sort of pre-CCtx-malloc step.
+ **
+ ** But... it's not actually used. Not in this library, anyway.
+ **/
 size_t ZSTD_estimateCCtxSize(ZSTD_compressionParameters cParams)
 {
     size_t const blockSize = MIN(ZSTD_BLOCKSIZE_ABSOLUTEMAX, (size_t)1 << cParams.windowLog);
@@ -207,8 +230,15 @@ static U32 ZSTD_equivalentParams(ZSTD_parameters param1, ZSTD_parameters param2)
 
 /*! ZSTD_continueCCtx() :
     reuse CCtx without reset (note : requires no dictionary) */
+/** JD: "frameContentSize" is "pledgedSrcSize" from compressBegin_internal, which
+ **     is "srcSize" from the initial ZSTD_compress args.
+ **     So... That's the size of the thing being compressed.
+ **/
 static size_t ZSTD_continueCCtx(ZSTD_CCtx* cctx, ZSTD_parameters params, U64 frameContentSize)
 {
+    /** JD: I'm putting a bunch of comments in regards to these in the definition
+     **     of ZSTD_CCtx_s
+     **/
     U32 const end = (U32)(cctx->nextSrc - cctx->base);
     cctx->params = params;
     cctx->frameContentSize = frameContentSize;
@@ -923,11 +953,12 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
 {
     U32* const hashTable = cctx->hashTable;
     U32  const hBits = cctx->params.cParams.hashLog;
-    seqStore_t* seqStorePtr = &(cctx->seqStore);
-    const BYTE* const base = cctx->base;
+    seqStore_t* seqStorePtr = &(cctx->seqStore); // JD: Sequences of matches?
+    const BYTE* const base = cctx->base;         // JD: "All regular indexes relative to this position." I can't work out where this is set. Something happens in ZSTD_compressContinue_internal
     const BYTE* const istart = (const BYTE*)src;
     const BYTE* ip = istart;
     const BYTE* anchor = istart;
+    /** JD: Bounds on data to compress. **/
     const U32   lowestIndex = cctx->dictLimit;
     const BYTE* const lowest = base + lowestIndex;
     const BYTE* const iend = istart + srcSize;
@@ -936,8 +967,13 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
     U32 offsetSaved = 0;
 
     /* init */
+    /** JD: ip = src before this. So... can't compress from the absolute start of src? But this only moves
+     ** ip forward a single byte.
+     **/
     ip += (ip==lowest);
     {   U32 const maxRep = (U32)(ip-lowest);
+	/** JD: So, maxRep = 1 if ip was previously equal to lowest. Otherwise, ...?
+	 **/
         if (offset_2 > maxRep) offsetSaved = offset_2, offset_2 = 0;
         if (offset_1 > maxRep) offsetSaved = offset_1, offset_1 = 0;
     }
@@ -2588,6 +2624,10 @@ static size_t ZSTD_compressBegin_internal(ZSTD_CCtx* cctx,
                              const void* dict, size_t dictSize,
                                    ZSTD_parameters params, U64 pledgedSrcSize)
 {
+    /** JD: Reset obviously has two modes, ZSTDcrp_continue makes resetCCtx_advanced
+     **     defer to ZSTD_continueCCtx. This is described as requiring no dictionary, so
+     **     given that dictSize must be 0, this makes some sense?
+     **/
     ZSTD_compResetPolicy_e const crp = dictSize ? ZSTDcrp_fullReset : ZSTDcrp_continue;
     CHECK_F(ZSTD_resetCCtx_advanced(cctx, params, pledgedSrcSize, crp));
     return ZSTD_compress_insertDictionary(cctx, dict, dictSize);
@@ -2695,22 +2735,37 @@ size_t ZSTD_compress_advanced (ZSTD_CCtx* ctx,
 
 size_t ZSTD_compress_usingDict(ZSTD_CCtx* ctx, void* dst, size_t dstCapacity, const void* src, size_t srcSize, const void* dict, size_t dictSize, int compressionLevel)
 {
+    /** JD: ZSTD_parameters = {ZSTD_compressionParameters, ZSTD_frameParameters}:
+     **     cParams set via ZSTD_getCParams, fParams is memset to 0.
+     **/
     ZSTD_parameters params = ZSTD_getParams(compressionLevel, srcSize, dict ? dictSize : 0);
     params.fParams.contentSizeFlag = 1;
     return ZSTD_compress_internal(ctx, dst, dstCapacity, src, srcSize, dict, dictSize, params);
 }
 
-size_t ZSTD_compressCCtx (ZSTD_CCtx* ctx, void* dst, size_t dstCapacity, const void* src, size_t srcSize, int compressionLevel)
+/** JD: Wraps around ZSTD_compress_usingDict, with a null dictionary.
+ **/
+size_t ZSTD_compressCCtx(ZSTD_CCtx* ctx, void* dst, size_t dstCapacity, const void* src, size_t srcSize, int compressionLevel)
 {
     return ZSTD_compress_usingDict(ctx, dst, dstCapacity, src, srcSize, NULL, 0, compressionLevel);
 }
 
+/** JD: The main compression function.
+ ** Defined in the external-facing API.
+ **/
 size_t ZSTD_compress(void* dst, size_t dstCapacity, const void* src, size_t srcSize, int compressionLevel)
 {
     size_t result;
     ZSTD_CCtx ctxBody;
     memset(&ctxBody, 0, sizeof(ctxBody));
+    /** JD: customMem holds custom memory allocation/freeing functions.
+     ** The ones defined for defaultCustomMem are just wrappers around
+     ** malloc and free.
+     **/
     memcpy(&ctxBody.customMem, &defaultCustomMem, sizeof(ZSTD_customMem));
+    /** JD: Actually just a call to ZSTD_compress_usingDict with NULL
+     ** for the dictionary
+     **/
     result = ZSTD_compressCCtx(&ctxBody, dst, dstCapacity, src, srcSize, compressionLevel);
     ZSTD_free(ctxBody.workSpace, defaultCustomMem);  /* can't free ctxBody itself, as it's on stack; free only heap content */
     return result;
