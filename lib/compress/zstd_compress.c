@@ -62,6 +62,7 @@ struct ZSTD_CCtx_s
     U32   hashLog3;         /* dispatch table : larger == faster, more memory */
     U32   loadedDictEnd;
     ZSTD_compressionStage_e stage;
+    /** JD: rep is somehow involved in setting offset_1 and offset_2. **/
     U32   rep[ZSTD_REP_NUM];
     U32   savedRep[ZSTD_REP_NUM];
     U32   dictID;
@@ -94,7 +95,8 @@ struct ZSTD_CCtx_s
      ** Sequences of matches?
      **/
     seqStore_t seqStore;    /* sequences storage ptrs */ 
-    U32* hashTable;
+    U32* hashTable;         /** JD: hashTable indexes are relative to base (refer search loop).
+                             ** hashTable indexes are the hashes themselves, so this is pretty sizeable...? **/
     U32* hashTable3;
     U32* chainTable;
     HUF_CElt* hufTable;
@@ -954,7 +956,11 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
     U32* const hashTable = cctx->hashTable;
     U32  const hBits = cctx->params.cParams.hashLog;
     seqStore_t* seqStorePtr = &(cctx->seqStore); // JD: Sequences of matches?
-    const BYTE* const base = cctx->base;         // JD: "All regular indexes relative to this position." I can't work out where this is set. Something happens in ZSTD_compressContinue_internal
+    const BYTE* const base = cctx->base;         /** JD: "All regular indexes relative to this position."
+                                                  ** I can't work out where this is set. Something happens
+                                                  ** in ZSTD_compressContinue_internal? Seems to just be error
+                                                  ** corrections, though.
+                                                  **/
     const BYTE* const istart = (const BYTE*)src;
     const BYTE* ip = istart;
     const BYTE* anchor = istart;
@@ -972,20 +978,28 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
      **/
     ip += (ip==lowest);
     {   U32 const maxRep = (U32)(ip-lowest);
-	/** JD: So, maxRep = 1 if ip was previously equal to lowest. Otherwise, ...?
-	 **/
+        /** JD: So, maxRep = 1 if ip was previously equal to lowest. Otherwise, ...?
+         ** A recurring issue here is that I can't work out where `base` is set (to something other
+         ** than NULL).
+         **/
         if (offset_2 > maxRep) offsetSaved = offset_2, offset_2 = 0;
         if (offset_1 > maxRep) offsetSaved = offset_1, offset_1 = 0;
     }
+    /** JD: Later code shows that offset_2 and offset_1 are the most two recent "offset" values in some regard.
+     ** See the `else` path for if((offset_1 > 0) & (...))
+     **/
 
     /* Main Search Loop */
     while (ip < ilimit) {   /* < instead of <=, because repcode check at (ip+1) */
         size_t mLength;
-        size_t const h = ZSTD_hashPtr(ip, hBits, mls);
-        U32 const current = (U32)(ip-base);
+        size_t const h = ZSTD_hashPtr(ip, hBits, mls);  /** JD: h = hash of next hBits _bytes_
+                                                         ** of data at ip. hBits elemof [4,8] **/
+        U32 const current = (U32)(ip-base);             /** JD: Still don't know what base is,
+                                                         ** because ip should be stil near src. **/
         U32 const matchIndex = hashTable[h];
         const BYTE* match = base + matchIndex;
         hashTable[h] = current;   /* update hash table */
+        /** JD: Immediate point: hashTable _only_ stores the most recent match of a given hash? **/
 
         if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == MEM_read32(ip+1))) {
             mLength = ZSTD_count(ip+1+4, ip+1+4-offset_1, iend) + 4;
@@ -1026,6 +1040,9 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
                 ip += rLength;
                 anchor = ip;
                 continue;   /* faster when present ... (?) */
+                /** JD: Is it possible that the author themselves isn't always sure
+                 ** of particular parts of their own code?
+                 **/
     }   }   }
 
     /* save reps for next block */
@@ -1423,8 +1440,8 @@ static void ZSTD_compressBlock_doubleFast_extDict_generic(ZSTD_CCtx* ctx,
 
         if (ip <= ilimit) {
             /* Fill Table */
-			hashSmall[ZSTD_hashPtr(base+current+2, hBitsS, mls)] = current+2;
-			hashLong[ZSTD_hashPtr(base+current+2, hBitsL, 8)] = current+2;
+                        hashSmall[ZSTD_hashPtr(base+current+2, hBitsS, mls)] = current+2;
+                        hashLong[ZSTD_hashPtr(base+current+2, hBitsL, 8)] = current+2;
             hashSmall[ZSTD_hashPtr(ip-2, hBitsS, mls)] = (U32)(ip-2-base);
             hashLong[ZSTD_hashPtr(ip-2, hBitsL, 8)] = (U32)(ip-2-base);
             /* check immediate repcode */
@@ -1548,7 +1565,7 @@ static U32 ZSTD_insertBt1(ZSTD_CCtx* zc, const BYTE* const ip, const U32 mls, co
             match = dictBase + matchIndex;
             matchLength += ZSTD_count_2segments(ip+matchLength, match+matchLength, iend, dictEnd, prefixStart);
             if (matchIndex+matchLength >= dictLimit)
-				match = base + matchIndex;   /* to prepare for next usage of match[matchLength] */
+                                match = base + matchIndex;   /* to prepare for next usage of match[matchLength] */
         }
 
         if (matchLength > bestLength) {
@@ -1627,7 +1644,7 @@ static size_t ZSTD_insertBtAndFindBestMatch (
             match = dictBase + matchIndex;
             matchLength += ZSTD_count_2segments(ip+matchLength, match+matchLength, iend, dictEnd, prefixStart);
             if (matchIndex+matchLength >= dictLimit)
-				match = base + matchIndex;   /* to prepare for next usage of match[matchLength] */
+                                match = base + matchIndex;   /* to prepare for next usage of match[matchLength] */
         }
 
         if (matchLength > bestLength) {
