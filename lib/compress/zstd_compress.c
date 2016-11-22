@@ -1,4 +1,4 @@
-/**
+/** vim:sts=4:et
  * Copyright (c) 2016-present, Yann Collet, Facebook, Inc.
  * All rights reserved.
  *
@@ -91,12 +91,15 @@ struct ZSTD_CCtx_s
     XXH64_state_t xxhState;
     ZSTD_customMem customMem;
 
-    /** JD: large swathes of this is (only?) set when btopt{,2} is the cParams strategy.
-     ** Sequences of matches?
+    /** JD: large swathes of this is (only?) set when btopt{,2} is the cParams
+     ** strategy. Sequences of matches?
      **/
     seqStore_t seqStore;    /* sequences storage ptrs */ 
-    U32* hashTable;         /** JD: hashTable indexes are relative to base (refer search loop).
-                             ** hashTable indexes are the hashes themselves, so this is pretty sizeable...? **/
+    U32* hashTable;         /** JD: hashTable indexes are relative to base
+                             ** (refer search loop). hashTable indexes are the
+                             ** hashes themselves, so this is pretty
+                             ** sizeable...?
+                             **/
     U32* hashTable3;
     U32* chainTable;
     HUF_CElt* hufTable;
@@ -869,8 +872,11 @@ static size_t ZSTD_count(const BYTE* pIn, const BYTE* pMatch, const BYTE* const 
         pIn += ZSTD_NbCommonBytes(diff);
         return (size_t)(pIn - pStart);
     }
-    if (MEM_64bits()) if ((pIn<(pInLimit-3)) && (MEM_read32(pMatch) == MEM_read32(pIn))) { pIn+=4; pMatch+=4; }
-    if ((pIn<(pInLimit-1)) && (MEM_read16(pMatch) == MEM_read16(pIn))) { pIn+=2; pMatch+=2; }
+    if (MEM_64bits()) /** JD: MEM_64bits returns true if sizeof(size_t)==8 **/
+            if ((pIn<(pInLimit-3)) && (MEM_read32(pMatch) == MEM_read32(pIn)))
+                { pIn+=4; pMatch+=4; }
+    if ((pIn<(pInLimit-1)) && (MEM_read16(pMatch) == MEM_read16(pIn)))
+    { pIn+=2; pMatch+=2; }
     if ((pIn<pInLimit) && (*pMatch == *pIn)) pIn++;
     return (size_t)(pIn - pStart);
 }
@@ -956,11 +962,12 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
     U32* const hashTable = cctx->hashTable;
     U32  const hBits = cctx->params.cParams.hashLog;
     seqStore_t* seqStorePtr = &(cctx->seqStore); // JD: Sequences of matches?
-    const BYTE* const base = cctx->base;         /** JD: "All regular indexes relative to this position."
-                                                  ** I can't work out where this is set. Something happens
-                                                  ** in ZSTD_compressContinue_internal? Seems to just be error
-                                                  ** corrections, though.
-                                                  **/
+    const BYTE* const base = cctx->base;
+    /** JD: "All regular indexes relative to this position."
+     ** I can't work out where this is set. Something happens
+     ** in ZSTD_compressContinue_internal? Seems to just be error
+     ** corrections, though.
+     **/
     const BYTE* const istart = (const BYTE*)src;
     const BYTE* ip = istart;
     const BYTE* anchor = istart;
@@ -973,47 +980,76 @@ void ZSTD_compressBlock_fast_generic(ZSTD_CCtx* cctx,
     U32 offsetSaved = 0;
 
     /* init */
-    /** JD: ip = src before this. So... can't compress from the absolute start of src? But this only moves
-     ** ip forward a single byte.
+    /** JD: ip = src before this. So... can't compress from the absolute start
+     ** of src? But this only moves ip forward a single byte.
      **/
     ip += (ip==lowest);
     {   U32 const maxRep = (U32)(ip-lowest);
-        /** JD: So, maxRep = 1 if ip was previously equal to lowest. Otherwise, ...?
-         ** A recurring issue here is that I can't work out where `base` is set (to something other
-         ** than NULL).
+        /** JD: So, maxRep = 1 if ip was previously equal to lowest.
+         ** Otherwise, ...? A recurring issue here is that I can't work
+         ** out where `base` is set (to something other than NULL).
          **/
         if (offset_2 > maxRep) offsetSaved = offset_2, offset_2 = 0;
         if (offset_1 > maxRep) offsetSaved = offset_1, offset_1 = 0;
     }
-    /** JD: Later code shows that offset_2 and offset_1 are the most two recent "offset" values in some regard.
-     ** See the `else` path for if((offset_1 > 0) & (...))
+    /** JD: Later code shows that offset_2 and offset_1 are the most two recent
+     ** "offset" values in some regard. See the `else` path for
+     ** if((offset_1 > 0) & (...))
      **/
 
     /* Main Search Loop */
     while (ip < ilimit) {   /* < instead of <=, because repcode check at (ip+1) */
         size_t mLength;
-        size_t const h = ZSTD_hashPtr(ip, hBits, mls);  /** JD: h = hash of next hBits _bytes_
-                                                         ** of data at ip. hBits elemof [4,8] **/
-        U32 const current = (U32)(ip-base);             /** JD: Still don't know what base is,
-                                                         ** because ip should be stil near src. **/
+        size_t const h = ZSTD_hashPtr(ip, hBits, mls);
+        /** JD: h = hash of next hBits _bytes_ of data at ip.
+         ** hBits = hashLog, elemof [6,x]: x = 25 if 32-bit, 27 if 64-bit.
+         ** Starts at the default value given by ZSTD_defaultCParameters, but
+         ** is reduced to the minimum of:
+         ** - MAX(ZSTD_MASHLOG_MIN, ZSTD_highbit((U32)(rSize)-1) + 1)
+         **             rSize = srcSize + dictSize + minSrcSize
+         ** - windowLog itself (min of above and the appropriate default)
+         ** - and the default value of hashLog.
+         **/
+        U32 const current = (U32)(ip-base);
         U32 const matchIndex = hashTable[h];
         const BYTE* match = base + matchIndex;
         hashTable[h] = current;   /* update hash table */
-        /** JD: Immediate point: hashTable _only_ stores the most recent match of a given hash? **/
+        /** JD: hashTable _only_ stores the most
+         ** recent match of a given hash? **/
 
-        if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == MEM_read32(ip+1))) {
+        if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == MEM_read32(ip+1)))
+                /** JD: So offsets are from the current value of ip, back to a
+                 ** probable match? Given that if there is no match, the offsets
+                 ** cycle. So this might be an optimisation based on the chance
+                 ** of repetitious data having changes of the same size as what
+                 ** it replaced.
+                 **/
+        {
             mLength = ZSTD_count(ip+1+4, ip+1+4-offset_1, iend) + 4;
+            /** JD: This appears to count the length of the match. Doesn't
+             ** seem to stop at pIn, LZ77 style **/
             ip++;
             ZSTD_storeSeq(seqStorePtr, ip-anchor, anchor, 0, mLength-MINMATCH);
         } else {
             U32 offset;
-            if ( (matchIndex <= lowestIndex) || (MEM_read32(match) != MEM_read32(ip)) ) {
+            if ( (matchIndex <= lowestIndex)
+                /** JD: lowestIndex is the lowest index of the block being
+                 ** compressed. **/
+                    || (MEM_read32(match) != MEM_read32(ip)) ) {
                 ip += ((ip-anchor) >> g_searchStrength) + 1;
+                /** JD: anchor being istart, g_searchStrength = 8. So, ip skips
+                 ** forward the further along the search is, but this only
+                 ** kicks in if the search is more than 2^8 away from the block
+                 ** start.
+                 **/
                 continue;
             }
+            /** JD: It's been established that the next 32 bits, from ip and
+             ** match, match. **/
             mLength = ZSTD_count(ip+4, match+4, iend) + 4;
             offset = (U32)(ip-match);
-            while (((ip>anchor) & (match>lowest)) && (ip[-1] == match[-1])) { ip--; match--; mLength++; } /* catch up */
+            while (((ip>anchor) & (match>lowest)) && (ip[-1] == match[-1]))
+                { ip--; match--; mLength++; } /* catch up */
             offset_2 = offset_1;
             offset_1 = offset;
 
